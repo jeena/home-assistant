@@ -39,6 +39,7 @@ CONF_PROFILE = "profile"
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"
 ATTR_ZOOM = "zoom"
+ATTR_TYPE = "type"
 
 DIR_UP = "UP"
 DIR_DOWN = "DOWN"
@@ -46,6 +47,9 @@ DIR_LEFT = "LEFT"
 DIR_RIGHT = "RIGHT"
 ZOOM_OUT = "ZOOM_OUT"
 ZOOM_IN = "ZOOM_IN"
+TYPE_CONTINOUS = "CONTINOUS"
+TYPE_ABSOLUTE = "ABSOLUTE"
+TYPE_RELATIVE = "RELATIVE"
 
 SERVICE_PTZ = "onvif_ptz"
 
@@ -65,9 +69,11 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 SERVICE_PTZ_SCHEMA = vol.Schema({
     ATTR_ENTITY_ID: cv.entity_ids,
-    ATTR_PAN: vol.In([DIR_LEFT, DIR_RIGHT]),
-    ATTR_TILT: vol.In([DIR_UP, DIR_DOWN]),
-    ATTR_ZOOM: vol.In([ZOOM_OUT, ZOOM_IN])
+    ATTR_PAN: vol.Or(vol.In([DIR_LEFT, DIR_RIGHT]), vol.Range(min=-1, max=1)),
+    ATTR_TILT: vol.Or(vol.In([DIR_UP, DIR_DOWN]), vol.Range(min=-1, max=1)),
+    ATTR_ZOOM: vol.Or(vol.In([ZOOM_OUT, ZOOM_IN]), vol.Range(min=-1, max=1)),
+    vol.Required(ATTR_TYPE, default=TYPE_CONTINOUS):
+        vol.In([TYPE_CONTINOUS, TYPE_ABSOLUTE, TYPE_RELATIVE])
 })
 
 
@@ -81,6 +87,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         pan = service.data.get(ATTR_PAN, None)
         tilt = service.data.get(ATTR_TILT, None)
         zoom = service.data.get(ATTR_ZOOM, None)
+        type_ = service.data.get(ATTR_TYPE, None)
         all_cameras = hass.data[ONVIF_DATA][ENTITIES]
         entity_ids = extract_entity_ids(hass, service)
         target_cameras = []
@@ -90,7 +97,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
             target_cameras = [camera for camera in all_cameras
                               if camera.entity_id in entity_ids]
         for camera in target_cameras:
-            camera.perform_ptz(pan, tilt, zoom)
+            camera.perform_ptz(type_, pan, tilt, zoom)
 
     hass.services.async_register(DOMAIN, SERVICE_PTZ, handle_ptz,
                                  schema=SERVICE_PTZ_SCHEMA)
@@ -162,23 +169,34 @@ class ONVIFHassCamera(Camera):
                           self._name, err)
             return
 
-    def perform_ptz(self, pan, tilt, zoom):
+    def perform_ptz(self, type_, pan, tilt, zoom):
         """Perform a PTZ action on the camera."""
         from onvif import exceptions
+        
         if self._ptz_service:
-            pan_val = 1 if pan == DIR_RIGHT else -1 if pan == DIR_LEFT else 0
-            tilt_val = 1 if tilt == DIR_UP else -1 if tilt == DIR_DOWN else 0
-            zoom_val = 1 if zoom == ZOOM_IN else -1 if zoom == ZOOM_OUT else 0
-            req = {"Velocity": {
-                "PanTilt": {"_x": pan_val, "_y": tilt_val},
-                "Zoom": {"_x": zoom_val}}}
+            type_val = "continous" if type_ == "" else type_
+            pan_val = 1 if pan == DIR_RIGHT else -1 if pan == DIR_LEFT else (pan or 0)
+            tilt_val = 1 if tilt == DIR_UP else -1 if tilt == DIR_DOWN else (tilt or 0)
+            zoom_val = 1 if zoom == ZOOM_IN else -1 if zoom == ZOOM_OUT else (zoom or 0)
+
+            xy = {"_x": pan_val, "_y": tilt_val}
+            z = {"_x": zoom_val}
+                
             try:
-                self._ptz_service.ContinuousMove(req)
+                if type_val == TYPE_ABSOLUTE:
+                    req = {"Position": {"PanTilt": xy, "Zoom": z}}
+                    self._ptz_service.AbsoluteMove(req)
+                elif type_val == TYPE_RELATIVE:
+                    req = {"Position": {"Translation": xy, "Zoom": z}}
+                    self._ptz_service.RelativeMove(req)
+                else:
+                    req = {"Velocity": {"PanTilt": xy, "Zoom": z}}
+                    self._ptz_service.ContinuousMove(req)
             except exceptions.ONVIFError as err:
                 if "Bad Request" in err.reason:
                     self._ptz_service = None
-                    _LOGGER.debug("Camera '%s' doesn't support PTZ.",
-                                  self._name)
+                    _LOGGER.debug("Camera '%s' doesn't support PTZ of type '%s.",
+                                  self._name, type_)
         else:
             _LOGGER.debug("Camera '%s' doesn't support PTZ.", self._name)
 
